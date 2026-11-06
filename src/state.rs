@@ -5,6 +5,7 @@ use smithay::{desktop::{PopupManager, Space, Window}, input::{Seat, SeatState}, 
 
 mod compositor_impls;
 pub struct NocturaStates {
+    pub time: std::time::Instant,
     pub dh: DisplayHandle,
     pub ls: LoopSignal,
     pub socket_name: OsString,

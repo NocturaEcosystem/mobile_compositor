@@ -1,10 +1,13 @@
+use std::time::Duration;
+
 use calloop::EventLoop;
-use smithay::{delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell, input::SeatHandler, reexports::wayland_server::{Client, Display, protocol::{wl_buffer, wl_surface::WlSurface}}, wayland::{buffer::BufferHandler, compositor::{CompositorClientState, CompositorHandler}, output::OutputHandler, selection::{SelectionHandler, data_device::{self, ClientDndGrabHandler, DataDeviceHandler, ServerDndGrabHandler}}, shell::xdg::XdgShellHandler, shm::ShmHandler, socket::ListeningSocketSource}};
+use smithay::{backend::{renderer::{self, damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement, gles::GlesRenderer}, winit::{self, WinitEvent}}, delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell, desktop::space, input::SeatHandler, output::{Mode, Output, PhysicalProperties}, reexports::wayland_server::{Client, Display, protocol::{wl_buffer, wl_surface::WlSurface}}, utils::{Scale, Transform::Flipped180}, wayland::{buffer::BufferHandler, compositor::{CompositorClientState, CompositorHandler}, output::OutputHandler, selection::{SelectionHandler, data_device::{self, ClientDndGrabHandler, DataDeviceHandler, ServerDndGrabHandler}}, shell::xdg::XdgShellHandler, shm::ShmHandler, socket::ListeningSocketSource}};
 use tracing::info;
 
 use crate::state::{NocturaStates, NocturaClients};
 use smithay::{desktop::{PopupManager, Space, Window}, input::{Seat, SeatState}, reexports::wayland_server::DisplayHandle, wayland::{compositor::CompositorState, output::OutputManagerState, selection::data_device::DataDeviceState, shell::xdg::XdgShellState, shm::ShmState}};
 use smithay::reexports::wayland_server::Resource;
+use tracing::warn;
 
 // Traits:
 
@@ -159,10 +162,12 @@ impl NocturaStates {
         let xdg_state = XdgShellState::new::<Self>(&dh);
         let space = Space::default();
         let popups = PopupManager::default();
+        let time = std::time::Instant::now();
 
         Self::prep_seat(&mut seat);
 
         Self {
+            time,
             dh,
             ls: el.get_signal(),
             socket_name,
@@ -181,4 +186,98 @@ impl NocturaStates {
     fn prep_seat(seat: &mut Seat<Self>) {
         seat.add_touch();
     }
+
+    pub fn start_win(&mut self, el: &mut EventLoop<NocturaStates>) -> Result<(), Box<dyn std::error::Error>> {
+        // this function is used to open the window through which you can see Noctura compositor
+
+        let (mut backend, winit) = winit::init::<GlesRenderer>()?;
+        let mut out_mode = Mode {
+            size: backend.window_size(),
+            refresh: 60000,
+        };
+        let output = Output::new(
+            "noctura".into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: smithay::output::Subpixel::Unknown,
+                // NOTE: add real monitor name + model in the non-nested version
+                make: "NocturaDisplay".into(),
+                model: "Nested".into(),
+            }
+        );
+
+        let _ = output.create_global::<NocturaStates>(&self.dh);
+        output.change_current_state(
+            Some(out_mode),
+            Some(Flipped180),      // NOTE: I currently dont know why i have to flip 
+    //                                                  the display, but for openGL you must do it, im not sure about other renderers
+            None,
+            Some((0, 0).into())
+        );
+        output.set_preferred(out_mode);
+        self.space.map_output(&output, (0, 0));
+        let mut damage_tracker = OutputDamageTracker::from_output(&output);
+        el.handle().insert_source(winit, move |event, _, state| {
+            match event {
+                WinitEvent::CloseRequested => {
+                    state.ls.stop();
+                }
+                WinitEvent::Resized { size, scale_factor } => {
+                    output.change_current_state(Some(Mode {size, refresh: 60_000}),
+                        None,
+                        None,
+                        None,
+                    );
+                }
+                WinitEvent::Redraw => {
+                    let render_res = backend.bind().and_then(|(renderer, mut framebuffer)| {
+                        let scale = Scale::from(output.current_scale().fractional_scale());
+                        space::render_output::<
+                            _,
+                            WaylandSurfaceRenderElement<GlesRenderer>,
+                            _,
+                            _
+                        >(
+                            &output, renderer, &mut framebuffer,
+                            1.0, 0, [&state.space],
+                            &[],
+                            &mut damage_tracker,
+                            [0.7, 0.1, 1.0, 1.0]
+                        ).map_err(|err| match err {
+                            renderer::damage::Error::Rendering(err) => smithay::backend::SwapBuffersError::from(err),
+                            _ => unreachable!(),
+                        })
+                    });
+
+                    match render_res {
+                        Ok(ror) => {
+                            if let Some(damage) = ror.damage {
+                                backend.submit(Some(damage));
+                            }
+                        }
+                        Err(error) => {
+                            warn!("Error while rendering {}", error)
+                        }
+                    }
+    
+
+                    for win in state.space.elements() {
+                        win.send_frame(&output, state.time.elapsed(), Some(Duration::ZERO), |_, _| { 
+                            Some(output.clone())   // clone as &output already borrowed it
+                        });
+                    }
+
+                    state.space.refresh();
+                    state.dh.flush_clients();
+                    backend.window().request_redraw();
+                }
+                WinitEvent::Input(e) => {
+                   // state.handle_input(e);
+                }
+                _ => {}
+            }
+        }).unwrap();
+        Ok(())
+    }
+    
 }

@@ -4,8 +4,8 @@ mod state;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().compact().init();
     let mut event_loop = EventLoop::<state::NocturaStates>::try_new()?;
-    let display: Display<state::NocturaStates> = Display::new()?;
-    let noctura_comp =  state::NocturaStates::new(&display, &event_loop);
+    let mut display: Display<state::NocturaStates> = Display::new()?;
+    let mut noctura_comp =  state::NocturaStates::new(&display, &event_loop);
     event_loop.handle().clone()
         .insert_source(
             Generic::new(display, Interest::READ, calloop::Mode::Level),
@@ -18,5 +18,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
         .expect("Error while trying to initializing wayland server source");
+    noctura_comp.start_win(&mut event_loop)?;
+    event_loop.run(None, &mut noctura_comp, move |_| {
+        // 
+    })?;
     Ok(())
 }
